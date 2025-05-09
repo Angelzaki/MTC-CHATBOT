@@ -13,16 +13,17 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { onAuthStateChanged } from 'firebase/auth';
-import { 
-  collection, 
-  addDoc, 
-  query, 
-  where, 
-  getDocs, 
-  doc, 
-  deleteDoc 
+import {
+  collection,
+  addDoc,
+  query,
+  where,
+  getDocs,
+  doc,
+  deleteDoc
 } from 'firebase/firestore';
 import { auth, db } from '../../firebaseconfig';
+import Voice from '@react-native-voice/voice';
 
 const ChatbotScreen = () => {
   const [messages, setMessages] = useState([]);
@@ -30,8 +31,51 @@ const ChatbotScreen = () => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
   const [isSending, setIsSending] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [transcript, setTranscript] = useState('');
   const flatListRef = useRef(null);
 
+  // Inicializar Voice
+  useEffect(() => {
+    // Inicialización básica
+    const setupVoice = async () => {
+      try {
+        // Configurar los listeners de Voice
+        Voice.onSpeechStart = () => {
+          console.log('Reconocimiento de voz iniciado');
+        };
+        Voice.onSpeechEnd = () => {
+          console.log('Reconocimiento de voz finalizado');
+        };
+        Voice.onSpeechResults = (event) => {
+          const text = event.value?.[0];
+          if (text) {
+            console.log('Texto reconocido:', text);
+            setTranscript(text);
+            setInput(text); // Actualizar el input con el texto transcrito
+          }
+        };
+        Voice.onSpeechError = (error) => {
+          console.error('Error de reconocimiento de voz:', error);
+          setIsRecording(false); // Asegurarse de resetear el estado si hay error
+        };
+      } catch (e) {
+        console.error('Error al configurar Voice:', e);
+      }
+    };
+  
+    setupVoice();
+  
+    return () => {
+      // Limpieza al desmontar
+      try {
+        Voice.removeAllListeners();
+        Voice.destroy();
+      } catch (e) {
+        console.error('Error al limpiar Voice:', e);
+      }
+    };
+  }, []);
   // Cargar usuario y mensajes previos
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
@@ -61,7 +105,7 @@ const ChatbotScreen = () => {
 
       const querySnapshot = await getDocs(q);
       let loadedMessages = [];
-      
+
       if (querySnapshot.empty) {
         // Si no hay mensajes, agregar mensaje de bienvenida
         const welcomeMessage = {
@@ -70,7 +114,7 @@ const ChatbotScreen = () => {
           text: 'Hola, soy InnovaEdu. ¿En qué puedo ayudarte sobre normas de tránsito?',
           timestamp: new Date()
         };
-        
+
         // Guardar el mensaje de bienvenida en Firestore
         await addDoc(collection(db, "ChatMessages"), {
           userId: userId,
@@ -78,7 +122,7 @@ const ChatbotScreen = () => {
           text: welcomeMessage.text,
           timestamp: welcomeMessage.timestamp
         });
-        
+
         loadedMessages.push(welcomeMessage);
       } else {
         // Cargar mensajes existentes
@@ -91,12 +135,12 @@ const ChatbotScreen = () => {
             timestamp: data.timestamp instanceof Date ? data.timestamp : data.timestamp.toDate()
           });
         });
-        
+
         // Ordenar mensajes por timestamp después de cargarlos
         // Esto evita la necesidad de índices compuestos en Firestore
         loadedMessages.sort((a, b) => a.timestamp - b.timestamp);
       }
-      
+
       setMessages(loadedMessages);
     } catch (error) {
       console.error("Error al cargar mensajes:", error);
@@ -110,14 +154,14 @@ const ChatbotScreen = () => {
   const saveMessage = async (message, sender) => {
     try {
       if (!user) return;
-      
+
       const docRef = await addDoc(collection(db, "ChatMessages"), {
         userId: user.uid,
         sender: sender,
         text: message,
         timestamp: new Date()
       });
-      
+
       return docRef.id;
     } catch (error) {
       console.error("Error al guardar mensaje:", error);
@@ -125,26 +169,66 @@ const ChatbotScreen = () => {
     }
   };
 
+  // Iniciar grabación de voz
+  const startRecording = async () => {
+    try {
+      // Eliminar la llamada a Voice.destroy() que está causando el error
+      // await Voice.destroy(); <- ELIMINAR ESTA LÍNEA
+      
+      // Limpiar cualquier texto anterior
+      setTranscript('');
+      
+      // Iniciar reconocimiento de voz en español
+      await Voice.start('es-ES');
+      setIsRecording(true);
+    } catch (error) {
+      console.error('Error al iniciar grabación de voz:', error);
+      Alert.alert('Error', 'No se pudo iniciar el reconocimiento de voz');
+    }
+  };
+
+  // Detener grabación de voz
+  const stopRecording = async () => {
+    try {
+      await Voice.stop();
+      setIsRecording(false);
+
+      // Si hay texto transcrito y no estamos enviando actualmente
+      if (transcript.trim() && !isSending) {
+        // Enviar el mensaje automáticamente después de una breve pausa
+        setTimeout(() => {
+          sendMessage();
+        }, 300);
+      }
+    } catch (error) {
+      console.error('Error al detener grabación de voz:', error);
+      setIsRecording(false);
+    }
+  };
+
   // Enviar mensaje
   const sendMessage = async () => {
-    if (input.trim() === '' || !user || isSending) return;
-    
+    // Usar transcript si existe, de lo contrario usar el input
+    const messageText = input.trim();
+
+    if (messageText === '' || !user || isSending) return;
+
     setIsSending(true);
-    const userMessageText = input.trim();
     setInput('');
+    setTranscript('');
 
     try {
       // Guardar mensaje del usuario en Firestore
-      const userMessageId = await saveMessage(userMessageText, 'user');
-      
+      const userMessageId = await saveMessage(messageText, 'user');
+
       // Agregar mensaje del usuario a la UI
       const userMessage = {
         id: userMessageId || Date.now().toString(),
         sender: 'user',
-        text: userMessageText,
+        text: messageText,
         timestamp: new Date()
       };
-      
+
       setMessages((prevMessages) => [...prevMessages, userMessage]);
 
       // Enviar mensaje a la API
@@ -153,15 +237,15 @@ const ChatbotScreen = () => {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ message: userMessageText }),
+        body: JSON.stringify({ message: messageText }),
       });
 
       const data = await response.json();
       const botResponse = data.reply || 'Lo siento, hubo un problema procesando tu mensaje.';
-      
+
       // Guardar respuesta del bot en Firestore
       const botMessageId = await saveMessage(botResponse, 'bot');
-      
+
       // Agregar respuesta del bot a la UI
       const botMessage = {
         id: botMessageId || Date.now().toString(),
@@ -169,11 +253,11 @@ const ChatbotScreen = () => {
         text: botResponse,
         timestamp: new Date()
       };
-      
+
       setMessages((prevMessages) => [...prevMessages, botMessage]);
     } catch (error) {
       console.error('Error al procesar mensaje:', error);
-      
+
       // Mensaje de error si falla la conexión
       const errorMessage = {
         id: Date.now().toString(),
@@ -181,7 +265,7 @@ const ChatbotScreen = () => {
         text: 'Error al conectar con el servidor.',
         timestamp: new Date()
       };
-      
+
       setMessages((prevMessages) => [...prevMessages, errorMessage]);
       await saveMessage(errorMessage.text, 'bot');
     } finally {
@@ -192,32 +276,32 @@ const ChatbotScreen = () => {
   // Eliminar todas las conversaciones
   const deleteAllMessages = async () => {
     if (!user) return;
-    
+
     Alert.alert(
       "Eliminar conversación",
       "¿Estás seguro que deseas eliminar toda la conversación?",
       [
         { text: "Cancelar", style: "cancel" },
-        { 
-          text: "Eliminar", 
+        {
+          text: "Eliminar",
           style: "destructive",
           onPress: async () => {
             try {
               setLoading(true);
-              
+
               // Obtener todos los mensajes del usuario
               const messagesRef = collection(db, "ChatMessages");
               const q = query(messagesRef, where("userId", "==", user.uid));
               const querySnapshot = await getDocs(q);
-              
+
               // Eliminar cada mensaje
               const deletePromises = [];
               querySnapshot.forEach((document) => {
                 deletePromises.push(deleteDoc(doc(db, "ChatMessages", document.id)));
               });
-              
+
               await Promise.all(deletePromises);
-              
+
               // Después de eliminar los mensajes, añadir un nuevo mensaje de bienvenida
               const welcomeMessage = {
                 id: Date.now().toString(),
@@ -225,7 +309,7 @@ const ChatbotScreen = () => {
                 text: 'Hola, soy InnovaEdu. ¿En qué puedo ayudarte sobre normas de tránsito?',
                 timestamp: new Date()
               };
-              
+
               // Guardar el mensaje de bienvenida en Firestore
               await addDoc(collection(db, "ChatMessages"), {
                 userId: user.uid,
@@ -233,7 +317,7 @@ const ChatbotScreen = () => {
                 text: welcomeMessage.text,
                 timestamp: welcomeMessage.timestamp
               });
-              
+
               // Actualizar el estado con solo el mensaje de bienvenida
               setMessages([welcomeMessage]);
               setLoading(false);
@@ -306,11 +390,18 @@ const ChatbotScreen = () => {
         <TouchableOpacity style={styles.attachButton}>
           <Ionicons name="attach-outline" size={22} color="#757575" />
         </TouchableOpacity>
-        
-        <TouchableOpacity style={styles.micButton}>
-          <Ionicons name="mic-outline" size={22} color="#757575" />
+
+        <TouchableOpacity
+          style={[styles.micButton, isRecording && styles.recordingMicButton]}
+          onPress={isRecording ? stopRecording : startRecording}
+        >
+          <Ionicons
+            name={isRecording ? "mic" : "mic-outline"}
+            size={22}
+            color={isRecording ? "#FFFFFF" : "#757575"}
+          />
         </TouchableOpacity>
-        
+
         <TextInput
           style={styles.textInput}
           placeholder="Escribe tu consulta..."
@@ -320,9 +411,9 @@ const ChatbotScreen = () => {
           multiline
           maxLength={500}
         />
-        
-        <TouchableOpacity 
-          onPress={sendMessage} 
+
+        <TouchableOpacity
+          onPress={sendMessage}
           style={[styles.sendButton, isSending && styles.sendingButton]}
           disabled={isSending}
         >
@@ -333,6 +424,21 @@ const ChatbotScreen = () => {
           )}
         </TouchableOpacity>
       </View>
+
+      {/* Indicador de grabación */}
+      {isRecording && (
+        <View style={styles.recordingContainer}>
+          <Text style={styles.recordingText}>
+            {transcript ? transcript : 'Escuchando...'}
+          </Text>
+          <TouchableOpacity
+            style={styles.stopRecordingButton}
+            onPress={stopRecording}
+          >
+            <Text style={styles.stopRecordingText}>Detener</Text>
+          </TouchableOpacity>
+        </View>
+      )}
     </KeyboardAvoidingView>
   );
 };
@@ -345,7 +451,7 @@ const styles = StyleSheet.create({
   loadingContainer: {
     flex: 1,
     justifyContent: 'center',
-    alignItems: 'center', 
+    alignItems: 'center',
     backgroundColor: '#FFFFFF',
   },
   loadingText: {
@@ -419,6 +525,10 @@ const styles = StyleSheet.create({
     padding: 8,
     marginRight: 4,
   },
+  recordingMicButton: {
+    backgroundColor: '#D32F2F',
+    borderRadius: 50,
+  },
   textInput: {
     flex: 1,
     minHeight: 44,
@@ -441,6 +551,33 @@ const styles = StyleSheet.create({
   },
   sendingButton: {
     backgroundColor: '#E57373',
+  },
+  recordingContainer: {
+    position: 'absolute',
+    bottom: 80,
+    left: 0,
+    right: 0,
+    backgroundColor: 'rgba(211, 47, 47, 0.9)',
+    padding: 16,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  recordingText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    flex: 1,
+  },
+  stopRecordingButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    marginLeft: 8,
+  },
+  stopRecordingText: {
+    color: '#D32F2F',
+    fontWeight: 'bold',
   },
 });
 
